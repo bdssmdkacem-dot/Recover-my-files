@@ -53,8 +53,10 @@ function New-TestPayload {
 }
 
 if ($Mode -eq "Prepare") {
-    if (-not (Get-Volume -FilePath $rootFull -ErrorAction SilentlyContinue)) {
-        Write-Warning "Make sure Root is on an NTFS volume before continuing."
+    $rootDrive = [System.IO.Path]::GetPathRoot($rootFull)
+    $volume = Get-Volume -DriveLetter $rootDrive.TrimEnd(':','\\') -ErrorAction SilentlyContinue
+    if ($volume -and $volume.FileSystem -ne "NTFS") {
+        throw "Root must be on an NTFS volume. Detected: $($volume.FileSystem)"
     }
 
     if (Test-Path $sourceFile) {
