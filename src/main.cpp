@@ -2,11 +2,15 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <objbase.h>
 #include <atomic>
 #include <thread>
 #include <vector>
 #include <string>
 #pragma comment(lib,"comctl32.lib")
+#pragma comment(lib,"shell32.lib")
+#pragma comment(lib,"ole32.lib")
 
 static HWND listBox,statusBox,progressBar,scanBtn,deepBtn,recoverBtn,sourceBox;
 static RecoveryEngine engine; static std::vector<RecoveryFile> results; static std::atomic_bool cancelScan{false}; static std::thread worker;
@@ -17,7 +21,7 @@ static void Add(HWND c,const std::wstring&s){SendMessageW(c,CB_ADDSTRING,0,(LPAR
 static void Sources(HWND c){
  wchar_t d[512]{}; GetLogicalDriveStringsW(511,d);
  for(wchar_t*p=d;*p;p+=wcslen(p)+1) Add(c,L"\\.\"+std::wstring(p,2));
- for(int i=0;i<32;i++){std::wstring x=L"\\.\\PhysicalDrive"+std::to_wstring(i);HANDLE h=CreateFileW(x.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);if(h!=INVALID_HANDLE_VALUE){Add(c,x);CloseHandle(h);}}
+ for(int i=0;i<32;i++){std::wstring x=L"\\\\.\\\\PhysicalDrive"+std::to_wstring(i);HANDLE h=CreateFileW(x.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);if(h!=INVALID_HANDLE_VALUE){Add(c,x);CloseHandle(h);}}
 }
 static void Start(HWND w,bool deep){
  if(worker.joinable())return; wchar_t src[128]{};GetWindowTextW(sourceBox,src,128);std::wstring err;
