@@ -140,6 +140,8 @@ struct AttrInfo {
     uint64_t realSize=0;
     uint64_t residentOffset=0;
     std::vector<uint8_t> resident;
+    bool compressed=false;
+    bool encrypted=false;
 };
 bool findData(const std::vector<uint8_t>& rec,uint64_t clusterSize,AttrInfo& out) {
     if(rec.size()<24) return false;
@@ -150,6 +152,9 @@ bool findData(const std::vector<uint8_t>& rec,uint64_t clusterSize,AttrInfo& out
         uint32_t type=le32(rec.data()+p); if(type==0xFFFFFFFF) break;
         uint32_t len=le32(rec.data()+p+4); if(len<16 || p+len>used) break;
         if(type==0x80 && rec[p+8]==0) {
+            uint16_t attrFlags=le16(rec.data()+p+12);
+            out.compressed=(attrFlags&0x0001)!=0;
+            out.encrypted=(attrFlags&0x4000)!=0;
             uint32_t valueLen=le32(rec.data()+p+16); uint16_t valueOff=le16(rec.data()+p+20);
             if(valueOff+valueLen<=len) {
                 out.resident.assign(rec.begin()+p+valueOff,rec.begin()+p+valueOff+valueLen);
@@ -157,6 +162,9 @@ bool findData(const std::vector<uint8_t>& rec,uint64_t clusterSize,AttrInfo& out
                 out.realSize=valueLen; return true;
             }
         } else if(type==0x80 && rec[p+8]!=0) {
+            uint16_t attrFlags=le16(rec.data()+p+12);
+            out.compressed=(attrFlags&0x0001)!=0;
+            out.encrypted=(attrFlags&0x4000)!=0;
             uint64_t real=le64(rec.data()+p+48); uint16_t runOff=le16(rec.data()+p+32);
             if(runOff<len && parseRunlist(rec.data()+p+runOff,len-runOff,clusterSize,out.runs)) {
                 out.realSize=real; return true;
@@ -297,7 +305,7 @@ bool RecoveryEngine::Scan(bool deep,const std::atomic_bool& cancel,const ScanCal
             AttrInfo data; if(!findData(q.rec,cluster,data)||data.realSize==0) continue;
             if(data.realSize > 64ULL*1024*1024*1024) continue;
             NameInfo ni; auto nit=names.find(q.id); if(nit==names.end()) continue;
-            RecoveryFile f{}; f.size=data.realSize; f.offset=data.runs.empty()?mftOffset+q.id*nb.recordSize:data.runs.front().diskOffset; f.type=L"file"; f.confidence=96; f.runs=std::move(data.runs);
+            RecoveryFile f{}; f.size=data.realSize; f.ntfsCompressed=data.compressed; f.ntfsEncrypted=data.encrypted; f.offset=data.runs.empty()?mftOffset+q.id*nb.recordSize:data.runs.front().diskOffset; f.type=L"file"; f.confidence=96; f.runs=std::move(data.runs);
             if(!data.resident.empty()){f.runs.clear();f.offset=mftOffset+q.id*nb.recordSize+data.residentOffset;f.size=data.resident.size();}
             f.path=buildPath(q.id,names)+L"/"+safePart(ni.name);
             auto dot=f.path.find_last_of(L'.'); if(dot!=std::wstring::npos && dot+1<f.path.size()) f.type=f.path.substr(dot+1);
@@ -324,6 +332,8 @@ bool RecoveryEngine::Scan(bool deep,const std::atomic_bool& cancel,const ScanCal
 
 bool RecoveryEngine::Recover(const RecoveryFile& file,const std::wstring& destination,std::wstring& error){
     if(handle_==INVALID_HANDLE_VALUE){error=L"No source selected.";return false;}
+    if(file.ntfsCompressed){error=L"This NTFS file is compressed. NTFS compression must be decoded before recovery.";return false;}
+    if(file.ntfsEncrypted){error=L"This NTFS file is encrypted (EFS). Raw bytes cannot be recovered as a usable decrypted file.";return false;}
     std::filesystem::path outDir(destination);std::error_code ec;std::filesystem::create_directories(outDir,ec);if(ec){error=L"Cannot create destination folder.";return false;}
     std::filesystem::path out=outDir/file.path;std::filesystem::create_directories(out.parent_path(),ec);if(ec){error=L"Cannot create recovery subfolders.";return false;}
     std::ofstream dst(out,std::ios::binary);if(!dst){error=L"Cannot create recovery file.";return false;}
