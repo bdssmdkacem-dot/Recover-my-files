@@ -6,12 +6,18 @@
 #include <string>
 #include <vector>
 
+struct RecoveryRun {
+    uint64_t diskOffset{};
+    uint64_t length{};
+};
+
 struct RecoveryFile {
     uint64_t offset{};
     uint64_t size{};
     std::wstring type;
     std::wstring path;
     int confidence{};
+    std::vector<RecoveryRun> runs;
 };
 
 struct ScanStats {
@@ -36,4 +42,5 @@ private:
     HANDLE handle_ = INVALID_HANDLE_VALUE;
     uint64_t size_ = 0;
     std::wstring source_;
+    bool volume_ = false;
 };
