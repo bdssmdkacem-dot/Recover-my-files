@@ -105,6 +105,7 @@ bool parseRunlist(const uint8_t* p,size_t len,uint64_t clusterSize,std::vector<R
 struct AttrInfo {
     std::vector<RecoveryRun> runs;
     uint64_t realSize=0;
+    uint64_t residentOffset=0;
     std::vector<uint8_t> resident;
 };
 bool findData(const std::vector<uint8_t>& rec,uint64_t clusterSize,AttrInfo& out) {
