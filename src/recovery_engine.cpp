@@ -127,6 +127,7 @@ bool parseRunlist(const uint8_t* p,size_t len,uint64_t clusterSize,std::vector<R
         currentLcn += delta;
         if(currentLcn<0) return false;
 
+        if(clusters > UINT64_MAX/clusterSize) return false;
         uint64_t bytes=clusters*clusterSize;
         uint64_t lcn=static_cast<uint64_t>(currentLcn);
         if(lcn>UINT64_MAX/clusterSize) return false;
@@ -300,51 +301,125 @@ bool lznt1Decompress(const uint8_t* src,size_t srcSize,uint8_t* dst,size_t dstCa
     written=out;
     return true;
 }
-bool readLogicalRange(HANDLE h,const std::vector<RecoveryRun>& runs,uint64_t logical,uint64_t length,std::vector<uint8_t>& out) {
-    out.assign(static_cast<size_t>(length),0);
-    uint64_t end=logical+length;
-    if(end<logical) return false;
-    for(const auto& r:runs){
-        uint64_t rEnd=r.logicalOffset+r.length;
-        if(rEnd<r.logicalOffset || rEnd<=logical || r.logicalOffset>=end) continue;
-        uint64_t a=std::max(logical,r.logicalOffset), b=std::min(end,rEnd);
-        uint64_t count=b-a;
-        if(r.sparse) continue;
-        uint64_t disk=r.diskOffset+(a-r.logicalOffset);
-        if(disk>UINT64_MAX-count) return false;
-        if(count>static_cast<uint64_t>(std::numeric_limits<DWORD>::max())) return false;
-        if(!readAt(h,disk,out.data()+(a-logical),static_cast<uint32_t>(count))) return false;
+bool readCompressedUnitPhysical(HANDLE h,
+                              const std::vector<RecoveryRun>& runs,
+                              uint64_t logicalStart,
+                              uint64_t unitSize,
+                              std::vector<uint8_t>& physical,
+                              uint64_t& allocatedBytes,
+                              uint64_t& sparseBytes,
+                              std::wstring& error) {
+    physical.clear();
+    allocatedBytes=0;
+    sparseBytes=0;
+
+    if(!unitSize || logicalStart>UINT64_MAX-unitSize) {
+        error=L"Invalid NTFS compression unit range.";
+        return false;
     }
+    const uint64_t logicalEnd=logicalStart+unitSize;
+
+    for(const auto& r:runs) {
+        if(r.logicalOffset>UINT64_MAX-r.length) {
+            error=L"NTFS runlist logical range overflow.";
+            return false;
+        }
+        const uint64_t runEnd=r.logicalOffset+r.length;
+        if(runEnd<=logicalStart || r.logicalOffset>=logicalEnd) continue;
+
+        const uint64_t a=std::max(logicalStart,r.logicalOffset);
+        const uint64_t b=std::min(logicalEnd,runEnd);
+        const uint64_t count=b-a;
+        if(!count) continue;
+
+        if(r.sparse) {
+            if(sparseBytes>UINT64_MAX-count) {
+                error=L"NTFS sparse byte count overflow.";
+                return false;
+            }
+            sparseBytes+=count;
+            continue;
+        }
+
+        const uint64_t disk=r.diskOffset+(a-r.logicalOffset);
+        if(disk<r.diskOffset || disk>UINT64_MAX-count) {
+            error=L"NTFS physical run range overflow.";
+            return false;
+        }
+        if(count>static_cast<uint64_t>(std::numeric_limits<DWORD>::max())) {
+            error=L"NTFS compressed run is too large for a single read.";
+            return false;
+        }
+        if(allocatedBytes>unitSize-count) {
+            error=L"NTFS compression unit has more allocated data than its logical size.";
+            return false;
+        }
+
+        const size_t oldSize=physical.size();
+        physical.resize(oldSize+static_cast<size_t>(count));
+        if(!readAt(h,disk,physical.data()+oldSize,static_cast<uint32_t>(count))) {
+            error=L"Failed to read allocated bytes of NTFS compressed unit.";
+            return false;
+        }
+        allocatedBytes+=count;
+    }
+
     return true;
 }
+
 bool recoverNtfsCompressed(HANDLE h,const RecoveryFile& file,std::ofstream& dst,uint64_t clusterSize,std::wstring& error) {
     if(file.runs.empty() || !clusterSize){error=L"Compressed NTFS file has no valid runlist.";return false;}
+    if(clusterSize>UINT64_MAX/16ULL){error=L"NTFS compression unit size overflow.";return false;}
     const uint64_t unit=clusterSize*16ULL;
     if(!unit || unit>16ULL*1024*1024){error=L"Unsupported NTFS compression unit size.";return false;}
-    uint64_t remaining=file.size, logical=0;
-    std::vector<uint8_t> unitData;
+
+    uint64_t remaining=file.size;
+    uint64_t logical=0;
+    std::vector<uint8_t> physical;
+    std::vector<uint8_t> decoded(static_cast<size_t>(unit));
+
     while(remaining){
-        uint64_t want=std::min<uint64_t>(unit,remaining);
-        if(!readLogicalRange(h,file.runs,logical,want,unitData)){error=L"Failed to read compressed NTFS unit.";return false;}
-        bool allZero=std::all_of(unitData.begin(),unitData.end(),[](uint8_t v){return v==0;});
-        if(allZero){
-            dst.write(reinterpret_cast<const char*>(unitData.data()),static_cast<std::streamsize>(want));
-            if(!dst){error=L"Write failed while restoring compressed sparse data.";return false;}
+        const uint64_t want=std::min<uint64_t>(unit,remaining);
+        uint64_t allocatedBytes=0;
+        uint64_t sparseBytes=0;
+
+        // NTFS compression is defined per 16-cluster unit. The decoder must
+        // receive the bytes that are physically allocated for that unit,
+        // concatenated in logical order. Sparse/unallocated logical space is
+        // not part of the compressed byte stream.
+        if(!readCompressedUnitPhysical(h,file.runs,logical,unit,physical,allocatedBytes,sparseBytes,error))
+            return false;
+
+        if(allocatedBytes==0){
+            // Entirely sparse compression unit: its logical contents are zero.
+            std::fill(decoded.begin(),decoded.begin()+static_cast<size_t>(want),0);
+            dst.write(reinterpret_cast<const char*>(decoded.data()),static_cast<std::streamsize>(want));
+            if(!dst){error=L"Write failed while restoring sparse NTFS compression unit.";return false;}
+        } else if(allocatedBytes==unit){
+            // NTFS stores a compression unit uncompressed when compression
+            // would not reduce its allocation. In that case the allocated
+            // bytes are already the logical unit contents.
+            dst.write(reinterpret_cast<const char*>(physical.data()),static_cast<std::streamsize>(want));
+            if(!dst){error=L"Write failed while restoring uncompressed NTFS compression unit.";return false;}
         } else {
-            std::vector<uint8_t> decoded(static_cast<size_t>(unit));
             size_t written=0;
-            if(lznt1Decompress(unitData.data(),unitData.size(),decoded.data(),decoded.size(),written)){
-                if(written<want) std::fill(decoded.begin()+written,decoded.begin()+want,0);
-                dst.write(reinterpret_cast<const char*>(decoded.data()),static_cast<std::streamsize>(want));
-            } else {
-                // An NTFS compression unit may be stored uncompressed when
-                // compression does not save space. In that case its allocated
-                // bytes are the logical bytes.
-                dst.write(reinterpret_cast<const char*>(unitData.data()),static_cast<std::streamsize>(want));
+            if(!lznt1Decompress(physical.data(),physical.size(),decoded.data(),decoded.size(),written)) {
+                error=L"Invalid or unreadable LZNT1 data in NTFS compressed unit.";
+                return false;
             }
+            if(written>unit){
+                error=L"LZNT1 decompressor returned more data than the compression unit.";
+                return false;
+            }
+            if(written<want)
+                std::fill(decoded.begin()+static_cast<size_t>(written),decoded.begin()+static_cast<size_t>(want),0);
+            dst.write(reinterpret_cast<const char*>(decoded.data()),static_cast<std::streamsize>(want));
             if(!dst){error=L"Write failed while decompressing NTFS data.";return false;}
         }
-        logical+=want; remaining-=want;
+
+        if(logical>UINT64_MAX-want){error=L"NTFS recovery logical offset overflow.";return false;}
+        logical+=want;
+        remaining-=want;
     }
     return true;
 }
