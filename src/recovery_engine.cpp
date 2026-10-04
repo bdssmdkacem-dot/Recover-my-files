@@ -1,6 +1,6 @@
 #include "recovery_engine.h"
 #include <algorithm>
-#include <chrono>
+#include <chrono>\n#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
