@@ -21,6 +21,7 @@ struct RecoveryFile {
     int confidence{};
     bool ntfsCompressed{};
     bool ntfsEncrypted{};
+    std::vector<uint8_t> ntfsEfsMetadata;
     std::vector<RecoveryRun> runs;
 };
 
