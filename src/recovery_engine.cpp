@@ -91,6 +91,7 @@ bool parseRunlist(const uint8_t* p,size_t len,uint64_t clusterSize,std::vector<R
 
     size_t i=0;
     int64_t currentLcn=0;
+    uint64_t logicalOffset=0;
     bool sawRun=false;
 
     while(i<len) {
@@ -110,8 +111,9 @@ bool parseRunlist(const uint8_t* p,size_t len,uint64_t clusterSize,std::vector<R
         // clusters but has no physical allocation on disk.
         if(offBytes==0) {
             if(clusters > UINT64_MAX/clusterSize) return false;
-            out.push_back({0,clusters*clusterSize,true});
-            sawRun=true;
+            uint64_t bytes=clusters*clusterSize;
+            out.push_back({0,bytes,true,logicalOffset});
+            logicalOffset+=bytes; sawRun=true;
             continue;
         }
 
@@ -129,8 +131,8 @@ bool parseRunlist(const uint8_t* p,size_t len,uint64_t clusterSize,std::vector<R
         if(lcn>UINT64_MAX/clusterSize) return false;
         uint64_t disk=lcn*clusterSize;
 
-        out.push_back({disk,bytes,false});
-        sawRun=true;
+        out.push_back({disk,bytes,false,logicalOffset});
+        logicalOffset+=bytes; sawRun=true;
     }
 
     return sawRun;
@@ -142,6 +144,7 @@ struct AttrInfo {
     std::vector<uint8_t> resident;
     bool compressed=false;
     bool encrypted=false;
+    uint64_t compressionUnitSize=0;
 };
 bool findData(const std::vector<uint8_t>& rec,uint64_t clusterSize,AttrInfo& out) {
     if(rec.size()<24) return false;
@@ -167,7 +170,9 @@ bool findData(const std::vector<uint8_t>& rec,uint64_t clusterSize,AttrInfo& out
             out.encrypted=(attrFlags&0x4000)!=0;
             uint64_t real=le64(rec.data()+p+48); uint16_t runOff=le16(rec.data()+p+32);
             if(runOff<len && parseRunlist(rec.data()+p+runOff,len-runOff,clusterSize,out.runs)) {
-                out.realSize=real; return true;
+                out.realSize=real;
+                if(out.compressed) out.compressionUnitSize=clusterSize*16ULL;
+                return true;
             }
         }
         p+=len;
@@ -248,6 +253,71 @@ std::wstring buildPath(uint64_t id,const std::unordered_map<uint64_t,NameInfo>& 
     std::wstring p;
     for(auto it=parts.rbegin();it!=parts.rend();++it) p+=L"\\"+*it;
     return p.empty()?L"\\Recovered":p;
+}
+bool lznt1Decompress(const uint8_t* src,size_t srcSize,uint8_t* dst,size_t dstCapacity,size_t& written) {
+    written=0;
+    if(!src || !srcSize || !dst || !dstCapacity) return false;
+    using RtlDecompressBufferFn=LONG (WINAPI*)(USHORT,PVOID,ULONG,PVOID,ULONG,PULONG);
+    static RtlDecompressBufferFn fn=[](){
+        HMODULE ntdll=GetModuleHandleW(L"ntdll.dll");
+        return ntdll ? reinterpret_cast<RtlDecompressBufferFn>(GetProcAddress(ntdll,"RtlDecompressBuffer")) : nullptr;
+    }();
+    if(!fn) return false;
+    ULONG out=0;
+    constexpr USHORT COMPRESSION_FORMAT_LZNT1=0x0002;
+    LONG st=fn(COMPRESSION_FORMAT_LZNT1,dst,static_cast<ULONG>(dstCapacity),
+               const_cast<uint8_t*>(src),static_cast<ULONG>(srcSize),&out);
+    if(st!=0) return false;
+    written=out;
+    return true;
+}
+bool readLogicalRange(HANDLE h,const std::vector<RecoveryRun>& runs,uint64_t logical,uint64_t length,std::vector<uint8_t>& out) {
+    out.assign(static_cast<size_t>(length),0);
+    uint64_t end=logical+length;
+    if(end<logical) return false;
+    for(const auto& r:runs){
+        uint64_t rEnd=r.logicalOffset+r.length;
+        if(rEnd<r.logicalOffset || rEnd<=logical || r.logicalOffset>=end) continue;
+        uint64_t a=std::max(logical,r.logicalOffset), b=std::min(end,rEnd);
+        uint64_t count=b-a;
+        if(r.sparse) continue;
+        uint64_t disk=r.diskOffset+(a-r.logicalOffset);
+        if(disk>UINT64_MAX-count) return false;
+        if(count>static_cast<uint64_t>(DWORD_MAX)) return false;
+        if(!readAt(h,disk,out.data()+(a-logical),static_cast<uint32_t>(count))) return false;
+    }
+    return true;
+}
+bool recoverNtfsCompressed(HANDLE h,const RecoveryFile& file,std::ofstream& dst,uint64_t clusterSize,std::wstring& error) {
+    if(file.runs.empty() || !clusterSize){error=L"Compressed NTFS file has no valid runlist.";return false;}
+    const uint64_t unit=clusterSize*16ULL;
+    if(!unit || unit>16ULL*1024*1024){error=L"Unsupported NTFS compression unit size.";return false;}
+    uint64_t remaining=file.size, logical=0;
+    std::vector<uint8_t> unitData;
+    while(remaining){
+        uint64_t want=std::min<uint64_t>(unit,remaining);
+        if(!readLogicalRange(h,file.runs,logical,want,unitData)){error=L"Failed to read compressed NTFS unit.";return false;}
+        bool allZero=std::all_of(unitData.begin(),unitData.end(),[](uint8_t v){return v==0;});
+        if(allZero){
+            dst.write(reinterpret_cast<const char*>(unitData.data()),static_cast<std::streamsize>(want));
+            if(!dst){error=L"Write failed while restoring compressed sparse data.";return false;}
+        } else {
+            std::vector<uint8_t> decoded(static_cast<size_t>(unit));
+            size_t written=0;
+            if(lznt1Decompress(unitData.data(),unitData.size(),decoded.data(),decoded.size(),written)){
+                if(written<want) std::fill(decoded.begin()+written,decoded.begin()+want,0);
+                dst.write(reinterpret_cast<const char*>(decoded.data()),static_cast<std::streamsize>(want));
+            } else {
+                // An NTFS compression unit may be stored uncompressed when
+                // compression does not save space. In that case its allocated
+                // bytes are the logical bytes.
+                dst.write(reinterpret_cast<const char*>(unitData.data()),static_cast<std::streamsize>(want));
+            }
+            if(!dst){error=L"Write failed while decompressing NTFS data.";return false;}
+        }
+        logical+=want; remaining-=want;
+    }
+    return true;
 }
 uint64_t estimateContainerSize(const std::vector<uint8_t>& b,size_t i,const std::wstring&type,uint64_t available,bool deep){
     const uint64_t cap=deep?4ULL*1024*1024*1024:512ULL*1024*1024;
@@ -332,12 +402,16 @@ bool RecoveryEngine::Scan(bool deep,const std::atomic_bool& cancel,const ScanCal
 
 bool RecoveryEngine::Recover(const RecoveryFile& file,const std::wstring& destination,std::wstring& error){
     if(handle_==INVALID_HANDLE_VALUE){error=L"No source selected.";return false;}
-    if(file.ntfsCompressed){error=L"This NTFS file is compressed. NTFS compression must be decoded before recovery.";return false;}
-    if(file.ntfsEncrypted){error=L"This NTFS file is encrypted (EFS). Raw bytes cannot be recovered as a usable decrypted file.";return false;}
     std::filesystem::path outDir(destination);std::error_code ec;std::filesystem::create_directories(outDir,ec);if(ec){error=L"Cannot create destination folder.";return false;}
     std::filesystem::path out=outDir/file.path;std::filesystem::create_directories(out.parent_path(),ec);if(ec){error=L"Cannot create recovery subfolders.";return false;}
     std::ofstream dst(out,std::ios::binary);if(!dst){error=L"Cannot create recovery file.";return false;}
     constexpr DWORD BUF=4*1024*1024;std::vector<char> buf(BUF);
+    if(file.ntfsCompressed){
+        std::vector<uint8_t> boot(512); NtfsBoot nb{};
+        if(!readAt(handle_,0,boot.data(),512)||!parseBoot(boot,nb)){error=L"Cannot determine NTFS cluster size for compressed recovery.";return false;}
+        if(!recoverNtfsCompressed(handle_,file,dst,static_cast<uint64_t>(nb.bytesPerSector)*nb.sectorsPerCluster,error)) return false;
+        return true;
+    }
     if(file.runs.empty()){
         uint64_t remaining=file.size,posBytes=file.offset;while(remaining){LARGE_INTEGER pos{};pos.QuadPart=static_cast<LONGLONG>(posBytes);if(!SetFilePointerEx(handle_,pos,nullptr,FILE_BEGIN)){error=L"Seek failed.";return false;}DWORD want=static_cast<DWORD>(std::min<uint64_t>(BUF,remaining)),got=0;if(!ReadFile(handle_,buf.data(),want,&got,nullptr)||!got){error=L"Read failed during recovery.";return false;}dst.write(buf.data(),got);if(!dst){error=L"Write failed.";return false;}posBytes+=got;remaining-=got;}
         return true;
