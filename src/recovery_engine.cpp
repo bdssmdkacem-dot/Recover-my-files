@@ -227,7 +227,7 @@ bool RecoveryEngine::Scan(bool deep,const std::atomic_bool& cancel,const ScanCal
             AttrInfo data; if(!findData(q.rec,cluster,data)||data.realSize==0) continue;
             NameInfo ni; auto nit=names.find(q.id); if(nit==names.end()) continue;
             RecoveryFile f{}; f.size=data.realSize; f.offset=data.runs.empty()?mftOffset+q.id*nb.recordSize:data.runs.front().diskOffset; f.type=L"file"; f.confidence=(flags&1)?92:96; f.runs=std::move(data.runs);
-            if(!data.resident.empty()){f.runs.clear();f.offset=mftOffset+q.id*nb.recordSize;f.size=data.resident.size();}
+            if(!data.resident.empty()){f.runs.clear();f.offset=mftOffset+q.id*nb.recordSize+data.residentOffset;f.size=data.resident.size();}
             f.path=buildPath(q.id,names)+L"/"+safePart(ni.name);
             auto dot=f.path.find_last_of(L'.'); if(dot!=std::wstring::npos && dot+1<f.path.size()) f.type=f.path.substr(dot+1);
             ++found; if(cb) cb(ScanStats{scanned*nb.recordSize,mftData.realSize,found,0},&f);
