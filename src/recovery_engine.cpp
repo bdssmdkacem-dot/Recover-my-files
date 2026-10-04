@@ -134,25 +134,59 @@ bool findData(const std::vector<uint8_t>& rec,uint64_t clusterSize,AttrInfo& out
     return false;
 }
 struct NameInfo { uint64_t parent=0; std::wstring name; uint8_t namespaceType=0; };
+
 bool findName(const std::vector<uint8_t>& rec,NameInfo& out) {
     if(rec.size()<24) return false;
     uint16_t first=le16(rec.data()+20); uint32_t used=le32(rec.data()+24);
     if(first>=rec.size() || used>rec.size()) return false;
+
+    bool found=false;
+    NameInfo best{};
+    int bestRank=99;
+
     size_t p=first;
     while(p+16<=used) {
-        uint32_t type=le32(rec.data()+p); if(type==0xFFFFFFFF) break;
-        uint32_t len=le32(rec.data()+p+4); if(len<16 || p+len>used) break;
+        uint32_t type=le32(rec.data()+p);
+        if(type==0xFFFFFFFF) break;
+        uint32_t len=le32(rec.data()+p+4);
+        if(len<16 || p+len>used) break;
+
         if(type==0x30 && rec[p+8]==0) {
-            uint32_t valueLen=le32(rec.data()+p+16); uint16_t valueOff=le16(rec.data()+p+20);
+            uint32_t valueLen=le32(rec.data()+p+16);
+            uint16_t valueOff=le16(rec.data()+p+20);
+
             if(valueOff+valueLen<=len && valueLen>=66) {
-                const uint8_t* v=rec.data()+p+valueOff; out.parent=le64(v)&0x0000FFFFFFFFFFFFULL;
-                uint8_t nl=v[64]; if(66u+nl*2u<=valueLen) {
-                    out.name.assign(reinterpret_cast<const wchar_t*>(v+66),reinterpret_cast<const wchar_t*>(v+66+nl*2));
-                    return true;
+                const uint8_t* v=rec.data()+p+valueOff;
+                uint8_t nl=v[64];
+                uint8_t ns=v[65];
+
+                if(nl>0 && 66u+static_cast<uint32_t>(nl)*2u<=valueLen) {
+                    NameInfo candidate{};
+                    candidate.parent=le64(v)&0x0000FFFFFFFFFFFFULL;
+                    candidate.name.assign(
+                        reinterpret_cast<const wchar_t*>(v+66),
+                        reinterpret_cast<const wchar_t*>(v+66+nl*2)
+                    );
+                    candidate.namespaceType=ns;
+
+                    // Prefer Win32 (1), then Win32+DOS (3), then DOS (2),
+                    // with POSIX (0) as the final fallback.
+                    int rank = (ns==1) ? 0 : (ns==3) ? 1 : (ns==2) ? 2 : 3;
+                    if(!found || rank<bestRank) {
+                        best=std::move(candidate);
+                        bestRank=rank;
+                        found=true;
+                        if(bestRank==0) break;
+                    }
                 }
             }
         }
         p+=len;
+    }
+
+    if(found) {
+        out=std::move(best);
+        return true;
     }
     return false;
 }
