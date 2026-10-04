@@ -87,20 +87,53 @@ bool parseBoot(const std::vector<uint8_t>& b,NtfsBoot& n) {
     return n.recordSize>=512 && n.recordSize<=65536;
 }
 bool parseRunlist(const uint8_t* p,size_t len,uint64_t clusterSize,std::vector<RecoveryRun>& out) {
-    size_t i=0; int64_t currentLcn=0;
+    if(!p || !len || !clusterSize) return false;
+
+    size_t i=0;
+    int64_t currentLcn=0;
+    bool sawRun=false;
+
     while(i<len) {
-        uint8_t h=p[i++]; if(!h) break;
-        uint8_t lenBytes=h&0x0F, offBytes=(h>>4)&0x0F;
-        if(!lenBytes || offBytes>8 || lenBytes>8 || i+lenBytes+offBytes>len) return false;
-        uint64_t clusters=0; for(uint8_t k=0;k<lenBytes;++k) clusters|=static_cast<uint64_t>(p[i++])<<(8*k);
-        int64_t delta=sle64(p+i,offBytes); i+=offBytes;
-        if(delta==0 && offBytes==0) return false;
+        uint8_t h=p[i++];
+        if(h==0) break;
+
+        uint8_t lenBytes=h&0x0F;
+        uint8_t offBytes=(h>>4)&0x0F;
+        if(!lenBytes || lenBytes>8 || offBytes>8 || i+lenBytes+offBytes>len) return false;
+
+        uint64_t clusters=0;
+        for(uint8_t k=0;k<lenBytes;++k)
+            clusters |= static_cast<uint64_t>(p[i++]) << (8*k);
+        if(!clusters) return false;
+
+        // A zero-sized LCN field denotes a sparse run. It occupies logical
+        // clusters but has no physical allocation on disk.
+        if(offBytes==0) {
+            if(clusters > UINT64_MAX/clusterSize) return false;
+            out.push_back({0,clusters*clusterSize,true});
+            sawRun=true;
+            continue;
+        }
+
+        int64_t delta=sle64(p+i,offBytes);
+        i+=offBytes;
+
+        if((delta>0 && currentLcn>INT64_MAX-delta) ||
+           (delta<0 && currentLcn<INT64_MIN-delta))
+            return false;
         currentLcn += delta;
-        if(currentLcn<0 || clusters==0) return false;
-        uint64_t bytes=clusters*clusterSize, disk=static_cast<uint64_t>(currentLcn)*clusterSize;
-        out.push_back({disk,bytes});
+        if(currentLcn<0) return false;
+
+        uint64_t bytes=clusters*clusterSize;
+        uint64_t lcn=static_cast<uint64_t>(currentLcn);
+        if(lcn>UINT64_MAX/clusterSize) return false;
+        uint64_t disk=lcn*clusterSize;
+
+        out.push_back({disk,bytes,false});
+        sawRun=true;
     }
-    return !out.empty();
+
+    return sawRun;
 }
 struct AttrInfo {
     std::vector<RecoveryRun> runs;
@@ -301,9 +334,31 @@ bool RecoveryEngine::Recover(const RecoveryFile& file,const std::wstring& destin
     }
     uint64_t remaining=file.size;
     for(const auto& run:file.runs){
-        uint64_t take=std::min<uint64_t>(remaining,run.length),pos=run.diskOffset;
-        while(take){LARGE_INTEGER p{};p.QuadPart=static_cast<LONGLONG>(pos);if(!SetFilePointerEx(handle_,p,nullptr,FILE_BEGIN)){error=L"Seek failed during fragmented recovery.";return false;}DWORD want=static_cast<DWORD>(std::min<uint64_t>(BUF,take)),got=0;if(!ReadFile(handle_,buf.data(),want,&got,nullptr)||!got){error=L"Read failed during fragmented recovery.";return false;}dst.write(buf.data(),got);if(!dst){error=L"Write failed.";return false;}pos+=got;take-=got;remaining-=got;}
-        if(!remaining)break;
+        if(!remaining) break;
+        uint64_t take=std::min<uint64_t>(remaining,run.length);
+
+        if(run.sparse) {
+            std::fill(buf.begin(),buf.end(),0);
+            while(take) {
+                DWORD want=static_cast<DWORD>(std::min<uint64_t>(BUF,take));
+                dst.write(buf.data(),want);
+                if(!dst){error=L"Write failed while restoring sparse data.";return false;}
+                take-=want;
+                remaining-=want;
+            }
+            continue;
+        }
+
+        uint64_t pos=run.diskOffset;
+        while(take){
+            LARGE_INTEGER p{};p.QuadPart=static_cast<LONGLONG>(pos);
+            if(!SetFilePointerEx(handle_,p,nullptr,FILE_BEGIN)){error=L"Seek failed during fragmented recovery.";return false;}
+            DWORD want=static_cast<DWORD>(std::min<uint64_t>(BUF,take)),got=0;
+            if(!ReadFile(handle_,buf.data(),want,&got,nullptr)||!got){error=L"Read failed during fragmented recovery.";return false;}
+            dst.write(buf.data(),got);
+            if(!dst){error=L"Write failed.";return false;}
+            pos+=got;take-=got;remaining-=got;
+        }
     }
     if(remaining){error=L"File runlist is shorter than the file size.";return false;} return true;
 }
