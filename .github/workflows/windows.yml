@@ -1,0 +1,41 @@
+name: Windows Portable Build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build Release
+        run: cmake --build build --config Release --parallel
+
+      - name: Package portable app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out/Recovery
+          Copy-Item build/Release/Recovery.exe out/Recovery/Recovery.exe
+          @"
+          Recover My Files - Portable Edition
+
+          Run Recovery.exe as Administrator.
+          Select the source drive.
+          Use Quick Scan first, then Deep Scan.
+          Recover files to a DIFFERENT drive.
+
+          Do not install or extract this folder onto the drive you are trying to recover.
+          "@ | Set-Content out/Recovery/README.txt
+          Compress-Archive -Path out/Recovery/* -DestinationPath out/Recover-My-Files-Portable-x64.zip
+
+      - name: Upload portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Recover-My-Files-Portable-x64
+          path: out/Recover-My-Files-Portable-x64.zip
