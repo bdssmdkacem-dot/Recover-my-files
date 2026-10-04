@@ -18,6 +18,8 @@ struct RecoveryFile {
     std::wstring type;
     std::wstring path;
     int confidence{};
+    bool ntfsCompressed{};
+    bool ntfsEncrypted{};
     std::vector<RecoveryRun> runs;
 };
 
