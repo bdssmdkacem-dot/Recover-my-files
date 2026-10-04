@@ -20,7 +20,7 @@ static void Status(const std::wstring&s){SetWindowTextW(statusBox,s.c_str());}
 static void Add(HWND c,const std::wstring&s){SendMessageW(c,CB_ADDSTRING,0,(LPARAM)s.c_str());}
 static void Sources(HWND c){
  wchar_t d[512]{}; GetLogicalDriveStringsW(511,d);
- for(wchar_t*p=d;*p;p+=wcslen(p)+1) Add(c,L"\\.\"+std::wstring(p,2));
+ for(wchar_t*p=d;*p;p+=wcslen(p)+1) Add(c,L"\\\\.\\\\"+std::wstring(p,2));
  for(int i=0;i<32;i++){std::wstring x=L"\\\\.\\\\PhysicalDrive"+std::to_wstring(i);HANDLE h=CreateFileW(x.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);if(h!=INVALID_HANDLE_VALUE){Add(c,x);CloseHandle(h);}}
 }
 static void Start(HWND w,bool deep){
