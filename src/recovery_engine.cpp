@@ -132,7 +132,7 @@ bool findData(const std::vector<uint8_t>& rec,uint64_t clusterSize,AttrInfo& out
     }
     return false;
 }
-struct NameInfo { uint64_t parent=0; std::wstring name; };
+struct NameInfo { uint64_t parent=0; std::wstring name; uint8_t namespaceType=0; };
 bool findName(const std::vector<uint8_t>& rec,NameInfo& out) {
     if(rec.size()<24) return false;
     uint16_t first=le16(rec.data()+20); uint32_t used=le32(rec.data()+24);
@@ -225,7 +225,7 @@ bool RecoveryEngine::Scan(bool deep,const std::atomic_bool& cancel,const ScanCal
         }
         for(const auto& q:pending){
             if(cancel.load()) break; uint16_t flags=le16(q.rec.data()+22);
-            AttrInfo data; if(!findData(q.rec,cluster,data)||data.realSize==0) continue;
+            AttrInfo data; if(!findData(q.rec,cluster,data)||data.realSize==0) continue;\n            if(data.realSize > 64ULL*1024*1024*1024) continue;
             NameInfo ni; auto nit=names.find(q.id); if(nit==names.end()) continue;
             RecoveryFile f{}; f.size=data.realSize; f.offset=data.runs.empty()?mftOffset+q.id*nb.recordSize:data.runs.front().diskOffset; f.type=L"file"; f.confidence=(flags&1)?92:96; f.runs=std::move(data.runs);
             if(!data.resident.empty()){f.runs.clear();f.offset=mftOffset+q.id*nb.recordSize+data.residentOffset;f.size=data.resident.size();}
