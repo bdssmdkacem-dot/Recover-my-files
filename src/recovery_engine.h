@@ -9,6 +9,7 @@
 struct RecoveryRun {
     uint64_t diskOffset{};
     uint64_t length{};
+    bool sparse{};
 };
 
 struct RecoveryFile {
