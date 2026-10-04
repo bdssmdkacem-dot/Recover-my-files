@@ -66,7 +66,8 @@ LRESULT CALLBACK Proc(HWND w,UINT msg,WPARAM a,LPARAM b){
   LVCOLUMNW c{};c.mask=LVCF_TEXT|LVCF_WIDTH;c.cx=75;c.pszText=(LPWSTR)L"Type";ListView_InsertColumn(listBox,0,&c);
   c.cx=360;c.pszText=(LPWSTR)L"Recovered path";ListView_InsertColumn(listBox,1,&c);
   c.cx=170;c.pszText=(LPWSTR)L"Size";ListView_InsertColumn(listBox,2,&c);
-  c.cx=90;c.pszText=(LPWSTR)L"Confidence";ListView_InsertColumn(listBox,3,&c);
+  c.cx=145;c.pszText=(LPWSTR)L"NTFS state";ListView_InsertColumn(listBox,3,&c);
+  c.cx=90;c.pszText=(LPWSTR)L"Confidence";ListView_InsertColumn(listBox,4,&c);
   progressBar=CreateWindowW(PROGRESS_CLASSW,L"",WS_CHILD|WS_VISIBLE,15,395,795,22,w,nullptr,nullptr,nullptr);
   statusBox=CreateWindowW(L"STATIC",L"Ready. Run as Administrator. Never recover onto the source disk.",WS_CHILD|WS_VISIBLE,15,425,795,40,w,nullptr,nullptr,nullptr);
   break;}
@@ -76,7 +77,7 @@ LRESULT CALLBACK Proc(HWND w,UINT msg,WPARAM a,LPARAM b){
   size_t i=(size_t)b;if(i<results.size()){auto&f=results[i];LVITEMW x{};x.mask=LVIF_TEXT;x.iItem=(int)i;x.pszText=(LPWSTR)f.type.c_str();ListView_InsertItem(listBox,&x);
    ListView_SetItemText(listBox,(int)i,1,(LPWSTR)f.path.c_str());wchar_t z[96];
    if(f.size>=1024ULL*1024*1024)swprintf_s(z,L"%.2f GB",f.size/1073741824.0);else swprintf_s(z,L"%.2f MB",f.size/1048576.0);
-   ListView_SetItemText(listBox,(int)i,2,z);swprintf_s(z,L"%d%%",f.confidence);ListView_SetItemText(listBox,(int)i,3,z);}
+   ListView_SetItemText(listBox,(int)i,2,z);std::wstring state=L"Normal";if(f.ntfsCompressed&&f.ntfsEncrypted)state=L"Compressed + Encrypted";else if(f.ntfsCompressed)state=L"Compressed";else if(f.ntfsEncrypted)state=L"Encrypted";ListView_SetItemText(listBox,(int)i,3,(LPWSTR)state.c_str());swprintf_s(z,L"%d%%",f.confidence);ListView_SetItemText(listBox,(int)i,4,z);}
   EnableWindow(recoverBtn,TRUE);break;}
  case WM_APP+2:{
   uint64_t d=(uint64_t)a,t=(uint64_t)b;SendMessageW(progressBar,PBM_SETPOS,t?(d*100/t):0,0);wchar_t z[200];
