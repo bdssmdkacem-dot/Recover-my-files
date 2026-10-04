@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -192,7 +193,7 @@ bool extractEfsMetadata(const std::vector<uint8_t>& rec,std::vector<uint8_t>& ou
         if(type==0x80){
             uint8_t nonResident=rec[p+8];
             uint8_t nameLen=rec[p+9]; uint16_t nameOff=le16(rec.data()+p+10);
-            if(nameLen==4 && nameOff+8<=len){
+            if(nameLen==4 && static_cast<uint32_t>(nameOff)+8u<=len){
                 const uint8_t* name=rec.data()+p+nameOff;
                 const uint8_t efsName[8]={'$','\0','E','\0','F','\0','S','\0'};
                 if(std::memcmp(name,efsName,8)==0 && !nonResident){
@@ -292,8 +293,8 @@ bool lznt1Decompress(const uint8_t* src,size_t srcSize,uint8_t* dst,size_t dstCa
     }();
     if(!fn) return false;
     ULONG out=0;
-    constexpr USHORT COMPRESSION_FORMAT_LZNT1=0x0002;
-    LONG st=fn(COMPRESSION_FORMAT_LZNT1,dst,static_cast<ULONG>(dstCapacity),
+    constexpr USHORT kCompressionFormatLznt1=0x0002;
+    LONG st=fn(kCompressionFormatLznt1,dst,static_cast<ULONG>(dstCapacity),
                const_cast<uint8_t*>(src),static_cast<ULONG>(srcSize),&out);
     if(st!=0) return false;
     written=out;
@@ -311,7 +312,7 @@ bool readLogicalRange(HANDLE h,const std::vector<RecoveryRun>& runs,uint64_t log
         if(r.sparse) continue;
         uint64_t disk=r.diskOffset+(a-r.logicalOffset);
         if(disk>UINT64_MAX-count) return false;
-        if(count>static_cast<uint64_t>(DWORD_MAX)) return false;
+        if(count>static_cast<uint64_t>(std::numeric_limits<DWORD>::max())) return false;
         if(!readAt(h,disk,out.data()+(a-logical),static_cast<uint32_t>(count))) return false;
     }
     return true;
